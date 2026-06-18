@@ -1,5 +1,7 @@
 # Local AI OCR to Excel
 
+![Python](https://img.shields.io/badge/Python-3.11_|_3.12-3776AB?style=flat-square&logo=python) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi) ![SQLite](https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite) ![OCR](https://img.shields.io/badge/OCR-10B981?style=flat-square) ![Receipts](https://img.shields.io/badge/Receipts-F59E0B?style=flat-square)
+
 Turn scanned documents, receipts, handwritten notes, and pasted text into reviewed spreadsheet rows.
 
 ## Why this project exists
