@@ -1,7 +1,6 @@
 from __future__ import annotations
-import csv, io, re, sqlite3
-from collections import Counter, defaultdict
-from datetime import date, datetime
+import csv, io, json, re, sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from fastapi import FastAPI, File, UploadFile
@@ -13,18 +12,15 @@ DB_FILE=Path(__file__).resolve().parent.parent/'data'/'app.sqlite'
 DB_FILE.parent.mkdir(exist_ok=True)
 app=FastAPI(title=APP_NAME, version='0.1.0')
 app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], allow_headers=['*'])
-def json_dumps(obj: Any) -> str:
-    import json; return json.dumps(obj, ensure_ascii=False)
-def json_loads(text: str) -> Any:
-    import json; return json.loads(text)
+
 def db() -> sqlite3.Connection:
     conn=sqlite3.connect(DB_FILE); conn.row_factory=sqlite3.Row; conn.execute('pragma journal_mode=wal'); return conn
+@app.on_event("startup")
 def init_db() -> None:
     with db() as conn: conn.execute('create table if not exists records (id integer primary key autoincrement, kind text not null, title text not null, payload text not null, created_at text not null)')
-init_db()
 def save_record(kind: str, title: str, payload: str) -> int:
     with db() as conn:
-        cur=conn.execute('insert into records(kind,title,payload,created_at) values (?,?,?,?)',(kind,title,payload,datetime.utcnow().isoformat())); return int(cur.lastrowid)
+        cur=conn.execute('insert into records(kind,title,payload,created_at) values (?,?,?,?)',(kind,title,payload,datetime.now(timezone.utc).isoformat())); return int(cur.lastrowid)
 def rows(kind: str | None = None) -> list[dict[str, Any]]:
     with db() as conn:
         data=conn.execute('select * from records where kind=? order by id desc',(kind,)).fetchall() if kind else conn.execute('select * from records order by id desc').fetchall()
@@ -52,7 +48,7 @@ def parse_document(text: str) -> list[dict[str, Any]]:
 @app.post('/api/process')
 def process(req: DocumentRequest):
     extracted = parse_document(req.text)
-    save_record('document', req.source, json_dumps({"source": req.source, "rows": extracted}))
+    save_record('document', req.source, json.dumps({"source": req.source, "rows": extracted}))
     return {"row_count": len(extracted), "rows": extracted}
 
 @app.post('/api/upload')
@@ -64,7 +60,7 @@ async def upload(file: UploadFile = File(...)):
 def export_csv():
     out=io.StringIO(); writer=csv.DictWriter(out, fieldnames=['date','description','amount','confidence','raw']); writer.writeheader()
     for rec in rows('document'):
-        for row in json_loads(rec['payload']).get('rows', []): writer.writerow(row)
+        for row in json.loads(rec['payload']).get('rows', []): writer.writerow(row)
     out.seek(0)
     return StreamingResponse(iter([out.getvalue()]), media_type='text/csv', headers={'Content-Disposition':'attachment; filename=ocr_export.csv'})
 

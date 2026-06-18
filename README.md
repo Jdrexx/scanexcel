@@ -4,6 +4,8 @@
 
 Turn scanned documents, receipts, handwritten notes, and pasted text into reviewed spreadsheet rows.
 
+![scanexcel-demo](screenshots/scanexcel-demo.png)
+
 ## Why this project exists
 
 This is a portfolio-ready MVP in the **document automation** lane. It demonstrates practical API product thinking, clean documentation, tests, and a working local browser demo.
