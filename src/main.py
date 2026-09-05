@@ -1,35 +1,53 @@
 from __future__ import annotations
 import csv, io, json, re, sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from fastapi import FastAPI, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+# Spreadsheet formula-injection guard: Excel/Sheets evaluate cells starting
+# with these characters as formulas. Extracted rows come from untrusted OCR
+# text, so a scanned line like "=HYPERLINK(...)" would execute when the export
+# is opened. Prefixing with a single quote forces text interpretation.
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: object) -> object:
+    text = str(value)
+    if text.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + text
+    return value
+
+
 APP_NAME = "Local AI OCR to Excel"
 DB_FILE = Path(__file__).resolve().parent.parent / "data" / "app.sqlite"
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB per upload
+
 DB_FILE.parent.mkdir(exist_ok=True)
-app = FastAPI(title=APP_NAME, version="0.1.0")
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
 
 
 def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     conn.execute("pragma journal_mode=wal")
+    # A concurrent writer surfaces "database is locked" instantly without this.
+    conn.execute("pragma busy_timeout=5000")
     return conn
 
 
-@app.on_event("startup")
-def init_db() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     with db() as conn:
         conn.execute(
             "create table if not exists records (id integer primary key autoincrement, kind text not null, title text not null, payload text not null, created_at text not null)"
         )
+    yield
+
+
+app = FastAPI(title=APP_NAME, version="0.1.0", lifespan=lifespan)
 
 
 def save_record(kind: str, title: str, payload: str) -> int:
@@ -64,8 +82,8 @@ def home():
 
 
 class DocumentRequest(BaseModel):
-    text: str = Field(..., min_length=1)
-    source: str = "manual"
+    text: str = Field(..., min_length=1, max_length=200_000)
+    source: str = Field(default="manual", max_length=500)
 
 
 def parse_document(text: str) -> list[dict[str, Any]]:
@@ -101,14 +119,15 @@ def process(req: DocumentRequest):
 
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...)):
-    MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
-    # CWE-400: mitigated via file size limit
+    # Content-Length is advisory (absent/spoofable under chunked encoding), so
+    # the bounded read below is the real cap; both checks stay.
     content_length = int(file.headers.get("content-length", 0))
     if content_length > MAX_UPLOAD_SIZE:
-        from fastapi import HTTPException
-
         raise HTTPException(413, detail=f"File too large. Maximum 10MB allowed.")
-    content = (await file.read()).decode("utf-8", errors="ignore")
+    raw = await file.read(MAX_UPLOAD_SIZE + 1)
+    if len(raw) > MAX_UPLOAD_SIZE:
+        raise HTTPException(413, detail=f"File too large. Maximum 10MB allowed.")
+    content = raw.decode("utf-8", errors="ignore")
     return process(DocumentRequest(text=content, source=file.filename or "upload"))
 
 
@@ -121,7 +140,12 @@ def export_csv():
     writer.writeheader()
     for rec in rows("document"):
         for row in json.loads(rec["payload"]).get("rows", []):
-            writer.writerow(row)
+            safe = dict(row)
+            # Guard only free-text columns; amounts may legitimately start with
+            # "-" (refunds/credits) and must stay numeric for Excel.
+            safe["description"] = _csv_safe(safe.get("description", ""))
+            safe["raw"] = _csv_safe(safe.get("raw", ""))
+            writer.writerow(safe)
     out.seek(0)
     return StreamingResponse(
         iter([out.getvalue()]),
